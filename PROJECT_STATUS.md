@@ -14,31 +14,143 @@
 
 ## 🔄 현재 진행 방식 (파이프라인)
 
-### 1단계: 원문 PDF 처리
-- **입력**: `data_test/raws/PMC###/article.pdf`
+### 0단계: PDF 수집 및 다운로드
+- **입력**: PMC ID 목록 또는 검색 쿼리
 - **처리**: 
-  - 텍스트 추출 → `text_extracted/PMC###/extracted_text.txt`
-  - YOLO로 figure/table 추출 → `graph_extracted/PMC###/figures/`, `tables/`
-  - GPT-4o Vision으로 이미지 분석 → `graph_analyzed/PMC###/all_analyses.json`
-- **목적**: 본문에서 화합물과 ADMET 정보 추출
+  - **PMC 직접 다운로드**: `pmc_direct_collector.py`, `gpt_paper_collector.py`
+    - PMC 표준 URL 패턴 시도: `/pmc/articles/{pmcid}/pdf/`
+    - 여러 fallback URL 시도 (europepmc.org 등)
+  - **보충자료 다운로드**: `supp_downloader.py`
+    - PMC 페이지에서 보충자료 링크 추출
+    - DOI 기반 출판사 페이지 접근
+    - Elsevier CDN 휴리스틱 (ars.els-cdn.com)
+    - GPT 기반 링크 추론 (최후 수단)
+- **출력**: 
+  - `data_test/raws/PMC###/article.pdf` (원문)
+  - `data_test/supp/PMC###/*.{xlsx,docx,pdf}` (보충자료)
+- **어려움**:
+  - ⚠️ **403 Forbidden 오류**: MDPI, ACS 등 일부 출판사에서 접근 차단
+  - ⚠️ **429 Too Many Requests**: PMC API 호출 제한
+  - ⚠️ **보충자료 링크 불명확**: HTML 파싱으로 찾기 어려운 경우 많음
+  - ⚠️ **다양한 출판사 형식**: 각 출판사마다 다른 URL 패턴과 접근 방식
+
+### 1단계: 원문 PDF 전처리 및 분리
+
+#### 1-1. 텍스트 추출
+- **처리**: `pdf_to_text.py` 또는 PyMuPDF 사용
+- **출력**: `text_extracted/PMC###/extracted_text.txt`
+- **어려움**:
+  - ⚠️ **PDF 인코딩 문제**: 일부 PDF에서 특수문자 깨짐
+  - ⚠️ **2-column 레이아웃**: 컬럼 순서가 뒤바뀌는 경우
+  - ⚠️ **수식/기호**: LaTeX 수식이 텍스트로 제대로 변환 안 됨
+  - ⚠️ **표 내부 텍스트**: 표가 이미지로 되어 있으면 추출 불가
+
+#### 1-2. 이미지/텍스트 분리 (YOLO)
+- **처리**: `inference_yolo.py` - YOLOv8 모델 사용
+- **모델**: PubLayNet 기반 훈련된 5-class 모델 (text, title, list, table, figure)
+- **과정**:
+  1. PDF를 이미지로 변환 (PyMuPDF)
+  2. 612x792 크기로 리사이즈 (PubLayNet 훈련 크기)
+  3. YOLO로 객체 감지 (confidence threshold: 0.25-0.4)
+  4. NMS (Non-Maximum Suppression)로 중복 제거
+  5. 원본 해상도로 좌표 변환
+  6. figure/table만 추출하여 PNG로 저장
+- **출력**: 
+  - `graph_extracted/PMC###/figures/*.png`
+  - `graph_extracted/PMC###/tables/*.png`
+- **어려움**:
+  - ⚠️ **YOLO 모델 정확도**: 일부 figure/table을 놓치거나 잘못 분류
+  - ⚠️ **복잡한 레이아웃**: figure와 table이 겹쳐있는 경우
+  - ⚠️ **작은 객체**: 작은 figure/table이 감지 안 됨 (min_area 설정 필요)
+  - ⚠️ **해상도 문제**: 저해상도 PDF에서 객체 경계가 불명확
+  - ⚠️ **처리 시간**: 긴 논문(100+ 페이지)은 처리 시간이 오래 걸림
+  - ⚠️ **메모리 사용**: 대용량 PDF 처리 시 메모리 부족 가능
+
+#### 1-3. 이미지 분석 (GPT-4o Vision)
+- **처리**: `analyze_yolo_extracted_images.py`
+- **과정**:
+  1. 추출된 figure/table 이미지를 base64 인코딩
+  2. GPT-4o Vision API 호출 (각 이미지마다)
+  3. JSON Lines 형식으로 화합물 정보 추출
+  4. 화합물별로 그룹화 및 중복 제거
+- **출력**: `graph_analyzed/PMC###/all_analyses.json`
+- **어려움**:
+  - ⚠️ **API 비용**: 이미지가 많을수록 비용 증가 (예: 50개 이미지 = 50회 API 호출)
+  - ⚠️ **이미지 품질**: 저해상도 이미지에서 텍스트 인식 실패
+  - ⚠️ **표 구조 복잡성**: 병합된 셀, 다단 구조 등 복잡한 표는 파싱 어려움
+  - ⚠️ **컨텍스트 부족**: 각 이미지를 독립적으로 분석하여 이전 이미지 정보를 모름 (→ 대화 히스토리로 해결 시도 중)
 
 ### 2단계: 보충자료 처리
-- **입력**: `data_test/supp/PMC###/*.{xlsx,docx,pdf}`
-- **처리**:
-  - **Excel**: `extract_excel_supplements.py` → `supp_extracted/PMC###/excel/`
-  - **Word**: `extract_word_supplements.py` → `supp_extracted/PMC###/word/`
-  - **PDF**: YOLO 추출 + GPT-4o Vision 분석 → `supp_extracted/PMC###/pdf_info/*_yolo_gpt_analysis.json`
-- **목적**: 보충자료에서 추가 화합물 정보 추출
+
+#### 2-1. Excel 파일 처리
+- **처리**: `extract_excel_supplements.py` → `admet_extract_llama.py`
+- **과정**:
+  1. Excel 파일 로드 (openpyxl, pandas)
+  2. 헤더 자동 감지 (LLM 기반 또는 휴리스틱)
+  3. 화합물-속성 쌍 추출 (long format)
+  4. (선택적) Llama로 속성 정규화
+- **출력**: `supp_extracted/PMC###/excel/PMC###_compounds_from_excel.json`
+- **어려움**:
+  - ⚠️ **헤더 감지 실패**: 헤더가 여러 행에 걸쳐 있거나 비표준 형식
+  - ⚠️ **병합된 셀**: Excel의 병합된 셀 처리 어려움
+  - ⚠️ **다중 시트**: 여러 시트에 걸쳐 있는 데이터 통합 필요
+  - ⚠️ **데이터 형식 불일치**: 숫자/텍스트 혼재, 단위 불명확
+
+#### 2-2. Word 파일 처리
+- **처리**: `extract_word_supplements.py`
+- **과정**:
+  1. Word 파일 로드 (python-docx)
+  2. 표 추출 (long format)
+  3. 표가 없으면 텍스트 추출
+- **출력**: `supp_extracted/PMC###/word/PMC###_compounds_from_word.json`
+- **어려움**:
+  - ⚠️ **복잡한 표 구조**: Word 표는 Excel보다 구조가 복잡
+  - ⚠️ **이미지 내 표**: 표가 이미지로 삽입된 경우 추출 불가
+  - ⚠️ **텍스트만 있는 경우**: 표가 없으면 구조화된 데이터 추출 어려움
+
+#### 2-3. PDF 보충자료 처리
+- **처리**: `batch_process_supplement_pdfs.py`
+- **과정**:
+  1. YOLO로 figure/table 추출 (본문과 동일)
+  2. GPT-4o Vision으로 이미지 분석
+  3. (선택적) PDF 텍스트 추출
+- **출력**: `supp_extracted/PMC###/pdf_info/*_yolo_gpt_analysis.json`
+- **어려움**:
+  - ⚠️ **보충자료 PDF 품질**: 스캔본이거나 저해상도인 경우 많음
+  - ⚠️ **대용량 파일**: 보충자료 PDF가 수백 페이지인 경우 처리 시간 오래 걸림
+  - ⚠️ **본문과 동일한 문제**: YOLO 정확도, 이미지 품질 등
 
 ### 3단계: 코어퍼런스 분석
 - **입력**: 텍스트 분석 결과
-- **처리**: `batch_build_coreference.py` → `entity_analyzed/PMC###/global_coreference_gpt.json`
+- **처리**: `batch_build_coreference.py`
+  - GPT-4o 또는 Llama로 텍스트 분석
+  - 화합물 이름, 별칭, 약어 추출
+  - 동일 화합물 그룹핑
+- **출력**: `entity_analyzed/PMC###/global_coreference_gpt.json`
 - **목적**: 같은 화합물의 다른 이름/별칭 통합 (예: "APA" = "6-(4-aminophenyl)-N-(3,4,5-trimethoxyphenyl)pyrazin-2-amine")
+- **어려움**:
+  - ⚠️ **약어 해석**: "Compound 1", "C1" 같은 약어가 어떤 화합물인지 추론 어려움
+  - ⚠️ **제형 구분**: "Liposomal APA"와 "APA"를 같은 것으로 볼지 다른 것으로 볼지 애매
+  - ⚠️ **SMILES/InChI 부재**: 구조식이 없으면 이름만으로 매칭 어려움
 
 ### 4단계: 최종 ADMET 통합 추출
 - **입력**: 모든 단계의 결과물
-- **처리**: `final_extract_admet.py` → `final_extracted/PMC###/PMC###_final_admet.json`
+  - 텍스트 추출 결과
+  - 이미지 분석 결과
+  - 보충자료 추출 결과 (Excel/Word/PDF)
+  - 코어퍼런스 딕셔너리
+- **처리**: `final_extract_admet.py`
+  - 모든 소스의 데이터를 하나의 프롬프트로 통합
+  - GPT-4o structured output 사용 (Pydantic BaseModel)
+  - 배치 처리로 화합물을 그룹으로 나누어 처리
+  - 화합물별로 모든 ADMET 지표 추출
+- **출력**: `final_extracted/PMC###/PMC###_final_admet.json`
 - **목적**: 모든 소스의 정보를 통합하여 완전한 ADMET 테이블 생성
+- **어려움**:
+  - ⚠️ **토큰 제한**: 입력 토큰은 충분하지만 출력 토큰(16,384) 제한으로 일부 화합물 누락
+  - ⚠️ **소스 간 충돌**: 같은 화합물의 같은 지표가 다른 값으로 나타나는 경우
+  - ⚠️ **컨텍스트 부족**: 각 단계가 독립적으로 실행되어 정보가 유기적으로 연결 안 됨
+  - ⚠️ **배치 크기 조정**: 화합물 수에 따라 배치 크기를 동적으로 조정해야 함
 
 ---
 
