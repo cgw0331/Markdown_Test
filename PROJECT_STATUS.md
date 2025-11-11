@@ -47,9 +47,10 @@
 - **효과**: PDF 다운로드 전에 약 20-30%의 비논문 문서 제외
 
 **2단계: PDF 내용 기반 필터링** (다운로드 후)
+- **라이브러리**: `pdfplumber` - PDF 텍스트 추출
 - **목적**: 다운로드한 PDF가 실제 연구 논문인지 최종 검증
 - **처리**: `is_research_paper()` 함수
-- **검증 방법**: PDF 텍스트 추출 후 키워드 기반 점수 계산
+- **검증 방법**: `pdfplumber`로 PDF 텍스트 추출 후 키워드 기반 점수 계산
 - **논문 키워드** (포함 점수):
   - `abstract`, `introduction`, `methods`, `results`, `discussion`, `conclusion`
   - `materials and methods`, `experimental`, `data`, `analysis`
@@ -89,7 +90,8 @@
 ### 1단계: 원문 PDF 전처리 및 분리
 
 #### 1-1. 텍스트 추출
-- **처리**: `pdf_to_text.py` 또는 PyMuPDF 사용
+- **라이브러리**: `pdfplumber` (PDF 텍스트 추출)
+- **처리**: `pdf_to_text.py` 스크립트
 - **출력**: `text_extracted/PMC###/extracted_text.txt`
 - **어려움**:
   - ⚠️ **PDF 인코딩 문제**: 일부 PDF에서 특수문자 깨짐
@@ -98,15 +100,20 @@
   - ⚠️ **표 내부 텍스트**: 표가 이미지로 되어 있으면 추출 불가
 
 #### 1-2. 이미지/텍스트 분리 (YOLO)
-- **처리**: `inference_yolo.py` - YOLOv8 모델 사용
-- **모델**: PubLayNet 기반 훈련된 5-class 모델 (text, title, list, table, figure)
+- **라이브러리**: 
+  - `PyMuPDF` (fitz) - PDF를 이미지로 변환
+  - `ultralytics YOLO` - 객체 감지 모델
+  - `PIL` (Pillow) - 이미지 처리
+  - `OpenCV` (cv2) - 이미지 리사이즈 및 좌표 변환
+- **처리**: `inference_yolo.py` 스크립트
+- **모델**: PubLayNet 기반 훈련된 YOLOv8 5-class 모델 (text, title, list, table, figure)
 - **과정**:
-  1. PDF를 이미지로 변환 (PyMuPDF)
+  1. PDF를 이미지로 변환 (`PyMuPDF` fitz)
   2. 612x792 크기로 리사이즈 (PubLayNet 훈련 크기)
-  3. YOLO로 객체 감지 (confidence threshold: 0.25-0.4)
+  3. `ultralytics YOLO`로 객체 감지 (confidence threshold: 0.25-0.4)
   4. NMS (Non-Maximum Suppression)로 중복 제거
-  5. 원본 해상도로 좌표 변환
-  6. figure/table만 추출하여 PNG로 저장
+  5. 원본 해상도로 좌표 변환 (`OpenCV`)
+  6. figure/table만 추출하여 PNG로 저장 (`PIL`)
 - **출력**: 
   - `graph_extracted/PMC###/figures/*.png`
   - `graph_extracted/PMC###/tables/*.png`
@@ -119,10 +126,13 @@
   - ⚠️ **메모리 사용**: 대용량 PDF 처리 시 메모리 부족 가능
 
 #### 1-3. 이미지 분석 (GPT-4o Vision)
-- **처리**: `analyze_yolo_extracted_images.py`
+- **라이브러리**: 
+  - `OpenAI API` (openai 패키지) - GPT-4o Vision 모델
+  - `PIL` (Pillow) - 이미지 로드 및 base64 인코딩
+- **처리**: `analyze_yolo_extracted_images.py` 스크립트
 - **과정**:
-  1. 추출된 figure/table 이미지를 base64 인코딩
-  2. GPT-4o Vision API 호출 (각 이미지마다)
+  1. 추출된 figure/table 이미지를 base64 인코딩 (`PIL`)
+  2. `OpenAI API` GPT-4o Vision 호출 (각 이미지마다)
   3. JSON Lines 형식으로 화합물 정보 추출
   4. 화합물별로 그룹화 및 중복 제거
 - **출력**: `graph_analyzed/PMC###/all_analyses.json`
@@ -135,12 +145,16 @@
 ### 2단계: 보충자료 처리
 
 #### 2-1. Excel 파일 처리
+- **라이브러리**: 
+  - `pandas` - Excel 파일 읽기 및 데이터 처리
+  - `openpyxl` - Excel 파일 파싱 (pandas 백엔드)
+  - `Ollama` (선택적) - Llama 모델로 속성 정규화
 - **처리**: `extract_excel_supplements.py` → `admet_extract_llama.py`
 - **과정**:
-  1. Excel 파일 로드 (openpyxl, pandas)
+  1. Excel 파일 로드 (`pandas.read_excel()`)
   2. 헤더 자동 감지 (LLM 기반 또는 휴리스틱)
-  3. 화합물-속성 쌍 추출 (long format)
-  4. (선택적) Llama로 속성 정규화
+  3. 화합물-속성 쌍 추출 (long format, `pandas`)
+  4. (선택적) `Ollama` Llama 모델로 속성 정규화
 - **출력**: `supp_extracted/PMC###/excel/PMC###_compounds_from_excel.json`
 - **어려움**:
   - ⚠️ **헤더 감지 실패**: 헤더가 여러 행에 걸쳐 있거나 비표준 형식
@@ -149,10 +163,13 @@
   - ⚠️ **데이터 형식 불일치**: 숫자/텍스트 혼재, 단위 불명확
 
 #### 2-2. Word 파일 처리
-- **처리**: `extract_word_supplements.py`
+- **라이브러리**: 
+  - `python-docx` (docx) - Word 파일 읽기 및 표 추출
+  - `pandas` - 표 데이터를 DataFrame으로 변환
+- **처리**: `extract_word_supplements.py` 스크립트
 - **과정**:
-  1. Word 파일 로드 (python-docx)
-  2. 표 추출 (long format)
+  1. Word 파일 로드 (`python-docx Document()`)
+  2. 표 추출 (`doc.tables`, `pandas DataFrame`으로 변환)
   3. 표가 없으면 텍스트 추출
 - **출력**: `supp_extracted/PMC###/word/PMC###_compounds_from_word.json`
 - **어려움**:
@@ -161,11 +178,16 @@
   - ⚠️ **텍스트만 있는 경우**: 표가 없으면 구조화된 데이터 추출 어려움
 
 #### 2-3. PDF 보충자료 처리
-- **처리**: `batch_process_supplement_pdfs.py`
+- **라이브러리**: 
+  - `PyMuPDF` (fitz) - PDF 처리
+  - `ultralytics YOLO` - 객체 감지
+  - `OpenAI API` - GPT-4o Vision
+  - `pdfplumber` (선택적) - PDF 텍스트 추출
+- **처리**: `batch_process_supplement_pdfs.py` 스크립트
 - **과정**:
-  1. YOLO로 figure/table 추출 (본문과 동일)
-  2. GPT-4o Vision으로 이미지 분석
-  3. (선택적) PDF 텍스트 추출
+  1. `ultralytics YOLO`로 figure/table 추출 (본문과 동일)
+  2. `OpenAI API` GPT-4o Vision으로 이미지 분석
+  3. (선택적) `pdfplumber`로 PDF 텍스트 추출
 - **출력**: `supp_extracted/PMC###/pdf_info/*_yolo_gpt_analysis.json`
 - **어려움**:
   - ⚠️ **보충자료 PDF 품질**: 스캔본이거나 저해상도인 경우 많음
@@ -173,9 +195,11 @@
   - ⚠️ **본문과 동일한 문제**: YOLO 정확도, 이미지 품질 등
 
 ### 3단계: 코어퍼런스 분석
+- **라이브러리**: 
+  - `OpenAI API` (GPT-4o) 또는 `Ollama` (Llama 4)
 - **입력**: 텍스트 분석 결과
-- **처리**: `batch_build_coreference.py`
-  - GPT-4o 또는 Llama로 텍스트 분석
+- **처리**: `batch_build_coreference.py` 스크립트
+  - `OpenAI API` GPT-4o 또는 `Ollama` Llama로 텍스트 분석
   - 화합물 이름, 별칭, 약어 추출
   - 동일 화합물 그룹핑
 - **출력**: `entity_analyzed/PMC###/global_coreference_gpt.json`
@@ -186,14 +210,17 @@
   - ⚠️ **SMILES/InChI 부재**: 구조식이 없으면 이름만으로 매칭 어려움
 
 ### 4단계: 최종 ADMET 통합 추출
+- **라이브러리**: 
+  - `OpenAI API` (openai 패키지) - GPT-4o 모델
+  - `Pydantic` - 구조화된 출력 스키마 정의 및 검증
 - **입력**: 모든 단계의 결과물
   - 텍스트 추출 결과
   - 이미지 분석 결과
   - 보충자료 추출 결과 (Excel/Word/PDF)
   - 코어퍼런스 딕셔너리
-- **처리**: `final_extract_admet.py`
+- **처리**: `final_extract_admet.py` 스크립트
   - 모든 소스의 데이터를 하나의 프롬프트로 통합
-  - GPT-4o structured output 사용 (Pydantic BaseModel)
+  - `OpenAI API` GPT-4o structured output 사용 (`Pydantic BaseModel`)
   - 배치 처리로 화합물을 그룹으로 나누어 처리
   - 화합물별로 모든 ADMET 지표 추출
 - **출력**: `final_extracted/PMC###/PMC###_final_admet.json`
@@ -358,11 +385,26 @@ data_test/
 
 ## 📝 기술 스택
 
-- **LLM**: GPT-4o (OpenAI API)
-- **Vision**: GPT-4o Vision (이미지 분석)
-- **로컬 LLM**: Llama 4 (코어퍼런스 분석, 선택적)
-- **이미지 추출**: YOLO (figure/table detection)
-- **데이터 구조**: Pydantic BaseModel (스키마 강제)
+### 핵심 라이브러리
+- **PDF 처리**:
+  - `pdfplumber` - PDF 텍스트 추출
+  - `PyMuPDF` (fitz) - PDF를 이미지로 변환
+- **이미지 처리**:
+  - `ultralytics YOLO` - 객체 감지 (figure/table)
+  - `PIL` (Pillow) - 이미지 로드/저장/인코딩
+  - `OpenCV` (cv2) - 이미지 리사이즈 및 좌표 변환
+- **LLM**:
+  - `OpenAI API` (openai 패키지) - GPT-4o, GPT-4o Vision
+  - `Ollama` - Llama 4 (코어퍼런스 분석, Excel 속성 정규화, 선택적)
+- **데이터 처리**:
+  - `pandas` - Excel/CSV 데이터 처리
+  - `openpyxl` - Excel 파일 파싱
+  - `python-docx` (docx) - Word 파일 처리
+  - `Pydantic` - 구조화된 출력 스키마 정의 및 검증
+- **기타**:
+  - `requests` - HTTP 요청 (PDF/보충자료 다운로드)
+  - `BeautifulSoup` - HTML 파싱 (보충자료 링크 추출)
+  - `lxml` - XML 파싱 (JATS 메타데이터)
 - **언어**: Python 3
 
 ---
