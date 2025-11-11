@@ -1,0 +1,252 @@
+# ADMET 데이터 추출 프로젝트 현황 문서
+
+## 📋 프로젝트 개요
+
+### 목적
+과학 논문(PubMed Central)에서 **화합물(Compound)의 ADMET (Absorption, Distribution, Metabolism, Excretion, Toxicity) 데이터**를 자동으로 추출하여 구조화된 데이터셋을 구축하는 것.
+
+### 핵심 목표
+- 논문 본문, 그림/표, 보충자료에서 **모든 화합물과 그들의 ADMET 지표**를 완전하게 추출
+- 여러 소스의 정보를 **유기적으로 연결**하여 통합된 데이터 생성
+- 추출된 데이터를 **구조화된 JSON/CSV 형식**으로 저장
+
+---
+
+## 🔄 현재 진행 방식 (파이프라인)
+
+### 1단계: 원문 PDF 처리
+- **입력**: `data_test/raws/PMC###/article.pdf`
+- **처리**: 
+  - 텍스트 추출 → `text_extracted/PMC###/extracted_text.txt`
+  - YOLO로 figure/table 추출 → `graph_extracted/PMC###/figures/`, `tables/`
+  - GPT-4o Vision으로 이미지 분석 → `graph_analyzed/PMC###/all_analyses.json`
+- **목적**: 본문에서 화합물과 ADMET 정보 추출
+
+### 2단계: 보충자료 처리
+- **입력**: `data_test/supp/PMC###/*.{xlsx,docx,pdf}`
+- **처리**:
+  - **Excel**: `extract_excel_supplements.py` → `supp_extracted/PMC###/excel/`
+  - **Word**: `extract_word_supplements.py` → `supp_extracted/PMC###/word/`
+  - **PDF**: YOLO 추출 + GPT-4o Vision 분석 → `supp_extracted/PMC###/pdf_info/*_yolo_gpt_analysis.json`
+- **목적**: 보충자료에서 추가 화합물 정보 추출
+
+### 3단계: 코어퍼런스 분석
+- **입력**: 텍스트 분석 결과
+- **처리**: `batch_build_coreference.py` → `entity_analyzed/PMC###/global_coreference_gpt.json`
+- **목적**: 같은 화합물의 다른 이름/별칭 통합 (예: "APA" = "6-(4-aminophenyl)-N-(3,4,5-trimethoxyphenyl)pyrazin-2-amine")
+
+### 4단계: 최종 ADMET 통합 추출
+- **입력**: 모든 단계의 결과물
+- **처리**: `final_extract_admet.py` → `final_extracted/PMC###/PMC###_final_admet.json`
+- **목적**: 모든 소스의 정보를 통합하여 완전한 ADMET 테이블 생성
+
+---
+
+## 🎯 해결해야 할 핵심 문제들
+
+### 1. **정보의 유기적 연결 부족** ⚠️ **최우선 문제**
+**문제점**:
+- 각 처리 단계(텍스트 추출, 이미지 분석, 보충자료 추출)가 **독립적으로 실행**됨
+- 각 단계의 LLM이 **이전 단계의 맥락을 모름**
+- 예: 텍스트에서 "Compound A"를 발견했는데, 이미지 분석 시 이 정보를 모르는 상태로 분석
+- 결과: 같은 화합물이 다른 이름으로 추출되거나, 정보가 제대로 매칭되지 않음
+
+**해결 시도**:
+- ✅ `contextual_extraction_pipeline.py` 생성: 각 단계의 결과를 누적하여 다음 단계에 전달
+- ✅ `analyze_yolo_extracted_images.py` 수정: `use_conversation_history=True`로 대화 히스토리 유지
+- ⚠️ **아직 완전히 해결되지 않음**: Excel/Word 추출 단계에서 컨텍스트 전달 미구현
+
+**필요한 작업**:
+- Excel/Word 추출 시에도 이전 컨텍스트를 참조하도록 수정
+- 최종 통합 단계에서도 단계별 누적 정보를 활용
+
+### 2. **화합물 추출 완전성 부족**
+**문제점**:
+- 보충자료에 178개 화합물이 있는데 2-3개만 추출됨
+- GPT-4o 출력 토큰 제한(16,384)으로 인한 불완전한 추출
+
+**해결 시도**:
+- ✅ 배치 처리 구현: 화합물을 작은 그룹으로 나누어 여러 번 API 호출
+- ✅ 프롬프트 개선: "ALL COMPOUND NAMES" 명시, exhaustive extraction 강조
+- ✅ 결과: 2개 → 34개 → 162개 (85.4% 포함률)로 개선
+
+**남은 문제**:
+- 여전히 100% 추출이 안 되는 경우 있음
+- 일부 논문에서 `LengthFinishReasonError` 발생 (출력 토큰 초과)
+
+### 3. **화합물 이름 정규화 및 매칭**
+**문제점**:
+- 같은 화합물이 다른 이름으로 추출됨 (예: "CBK037537" vs "Compound 1")
+- Coreference 분석이 완벽하지 않음
+
+**해결 시도**:
+- ✅ Coreference 분석 파이프라인 구축
+- ✅ 최종 통합 단계에서 aliases 필드로 별칭 관리
+- ⚠️ **아직 완전하지 않음**: SMILES/InChI 기반 매칭 미구현
+
+### 4. **ADMET 지표 표준화**
+**문제점**:
+- 단위가 일관되지 않음 (µM vs uM vs μM)
+- 같은 지표가 다른 이름으로 표현됨
+
+**해결 시도**:
+- ✅ 프롬프트에 정규화 규칙 명시
+- ✅ Pydantic BaseModel로 스키마 강제
+- ⚠️ **부분적 해결**: 여전히 일부 불일치 발생
+
+---
+
+## 🐛 현재 구체적인 문제점들
+
+### 1. **컨텍스트 누적이 완전하지 않음**
+- 이미지 분석은 대화 히스토리 유지 ✅
+- Excel/Word 추출은 컨텍스트 미전달 ❌
+- 최종 통합 단계에서 단계별 맥락 부족 ❌
+
+### 2. **보충자료 다운로드 실패**
+- MDPI, ACS 출판사에서 403 Forbidden 발생
+- 일부 논문은 보충자료를 다운로드할 수 없음
+- **영향**: 해당 논문들은 보충자료 정보 없이 처리됨
+
+### 3. **출력 토큰 제한**
+- GPT-4o 최대 출력 토큰: 16,384
+- 화합물이 많은 논문(200개 이상)에서 출력이 잘림
+- **해결책**: 배치 처리로 나누지만, 여전히 일부 손실 가능
+
+### 4. **정보 소스 우선순위 불명확**
+- 같은 화합물의 같은 지표가 여러 소스에서 다른 값으로 나타남
+- 현재: supplement > image > text 우선순위
+- **문제**: 충돌 해결 로직이 완벽하지 않음
+
+### 5. **Excel/Word 추출 품질**
+- Excel: 헤더 자동 감지가 완벽하지 않음
+- Word: 표 추출이 복잡한 구조에서 실패
+- **영향**: 보충자료 정보 누락
+
+---
+
+## 📊 현재 데이터 구조
+
+### 입력 구조
+```
+data_test/
+├── raws/PMC###/          # 원문 PDF
+│   └── article.pdf
+└── supp/PMC###/          # 보충자료
+    ├── *.xlsx
+    ├── *.docx
+    └── *.pdf
+```
+
+### 중간 처리 결과
+```
+data_test/
+├── text_extracted/PMC###/        # 텍스트 추출
+├── graph_extracted/PMC###/      # YOLO 추출 (figures, tables)
+├── graph_analyzed/PMC###/       # 이미지 분석 결과
+├── supp_extracted/PMC###/       # 보충자료 추출
+│   ├── excel/
+│   ├── word/
+│   ├── pdf_graph/
+│   └── pdf_info/
+└── entity_analyzed/PMC###/      # 코어퍼런스 분석
+```
+
+### 최종 출력
+```
+data_test/
+└── final_extracted/PMC###/
+    ├── PMC###_final_admet.json  # 구조화된 ADMET 데이터
+    └── admet_indicators_only.csv # CSV 형식 (간소화)
+```
+
+---
+
+## 🎯 다음 단계 우선순위
+
+### 1. **컨텍스트 누적 완성** (최우선)
+- [ ] Excel 추출 시 이전 컨텍스트 전달
+- [ ] Word 추출 시 이전 컨텍스트 전달
+- [ ] 최종 통합 단계에서 단계별 맥락 활용
+- [ ] 각 단계의 결과를 실시간으로 컨텍스트에 누적
+
+### 2. **추출 완전성 향상**
+- [ ] 배치 크기 최적화 (현재 50개 → 동적 조정)
+- [ ] 출력 토큰 초과 시 자동 재시도 로직
+- [ ] 화합물 목록을 먼저 추출한 후 속성 추출 (2단계 방식)
+
+### 3. **화합물 매칭 개선**
+- [ ] SMILES/InChI 기반 자동 매칭
+- [ ] Coreference 분석 정확도 향상
+- [ ] 화합물 이름 정규화 강화
+
+### 4. **보충자료 다운로드 개선**
+- [ ] MDPI/ACS 접근 문제 해결 (User-Agent, Referer 조정)
+- [ ] 대체 다운로드 방법 탐색
+- [ ] GPT 기반 링크 추론 강화
+
+### 5. **데이터 품질 검증**
+- [ ] 추출된 데이터 검증 로직
+- [ ] 누락된 화합물 감지
+- [ ] 값의 일관성 검사
+
+---
+
+## 📝 기술 스택
+
+- **LLM**: GPT-4o (OpenAI API)
+- **Vision**: GPT-4o Vision (이미지 분석)
+- **로컬 LLM**: Llama 4 (코어퍼런스 분석, 선택적)
+- **이미지 추출**: YOLO (figure/table detection)
+- **데이터 구조**: Pydantic BaseModel (스키마 강제)
+- **언어**: Python 3
+
+---
+
+## 🔍 테스트 현황
+
+### 성공 사례
+- **PMC7066191**: 162개 화합물 추출 (85.4% 포함률)
+- **PMC7878295**: 보충자료 Excel에서 성공적으로 추출
+- **PMC12006413**: 복잡한 보충자료 처리 성공
+
+### 실패/부분 실패 사례
+- **PMC10017499**: 보충자료 다운로드 실패
+- **PMC10177590**: MDPI 403 오류
+- **PMC12077378**: 출력 토큰 초과 (`LengthFinishReasonError`)
+
+---
+
+## 💡 핵심 인사이트
+
+1. **단일 프롬프트로 모든 것을 추출하는 것의 한계**
+   - 여러 단계로 나누고, 각 단계의 결과를 누적하는 것이 중요
+   - 맥락 유지가 추출 품질에 결정적
+
+2. **배치 처리의 필요성**
+   - 화합물이 많은 논문은 반드시 배치로 나눠야 함
+   - 배치 크기는 동적으로 조정 필요
+
+3. **소스 간 정보 통합의 어려움**
+   - 같은 화합물을 다른 이름으로 부르는 경우가 많음
+   - SMILES/InChI 같은 구조식 기반 매칭이 필수
+
+4. **프롬프트 엔지니어링의 중요성**
+   - "ALL", "EXHAUSTIVE", "NEVER stop" 같은 키워드가 효과적
+   - 구체적인 예시와 형식 명시가 필수
+
+---
+
+## 📌 다음 미팅/리뷰 시 논의할 사항
+
+1. 컨텍스트 누적 완성도 평가
+2. 추출 완전성 목표 설정 (현재 85% → 목표 95%+)
+3. 보충자료 다운로드 실패 논문 처리 방안
+4. 데이터 검증 및 품질 관리 프로세스 수립
+5. 대규모 배치 처리 시 비용 최적화 방안
+
+---
+
+**최종 업데이트**: 2025-01-XX
+**작성자**: AI Assistant (대화 내용 기반)
+
